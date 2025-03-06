@@ -13,8 +13,7 @@ interface ArchiveBoxPluginSettings {
 	useBasicAuth: boolean;
 	basicAuthUsername: string;
 	basicAuthPassword: string;
-	archiveBoxUsername: string;
-	archiveBoxPassword: string;
+	archiveBoxApiKey: string,
 	ignoreDomains: string;
 	ignoreRFC1918Addresses: boolean;
 	archivedBefore: object;
@@ -33,8 +32,7 @@ const DEFAULT_SETTINGS: ArchiveBoxPluginSettings = {
 	useBasicAuth: false,
 	basicAuthUsername: "",
 	basicAuthPassword: "",
-	archiveBoxUsername: "",
-	archiveBoxPassword: "",
+	archiveBoxApiKey: "",
 	ignoreDomains: "",
 	ignoreRFC1918Addresses: true,
 	archivedBefore: {},
@@ -168,20 +166,15 @@ export default class ArchiveBoxPlugin extends Plugin {
 			return false;
 		}
 
-		// 2. Check if username or password exists, the other exists.
+		// 2. Check if api key exists.
 		if (
-			(this.settings.username === "" && this.settings.password !== "") ||
-			(this.settings.password === "" && this.settings.username !== "")
+		  (this.settings.archiveBoxApiKey === "")
 		) {
 			if (updateStatusBar) {
-				if (this.settings.username === "") {
-					this.updateStatusBar("❌ Missing ArchiveBox username");
-				} else {
-					this.updateStatusBar("❌ Missing ArchiveBox password");
-				}
+					this.updateStatusBar("❌ Missing ArchiveBox api key");
 			}
       if (this.settings.debugMode === true) {
-        console.log("Settings validation failed, missing username/password");
+        console.log("Settings validation failed, missing api key");
       }
 			return false;
 		}
@@ -275,14 +268,6 @@ export default class ArchiveBoxPlugin extends Plugin {
 		links: Array<string>,
 		forceUpdate: boolean = false
 	) {
-		if (this.loggedIn === false) {
-			console.log(`ArchiveBox: Getting session...`);
-			this.updateStatusBar("Logging into ArchiveBox...");
-			await this.loginToArchiveBox(
-				this.settings.archiveBoxUsername,
-				this.settings.archiveBoxPassword
-			);
-		}
 
 		this.linkBatch = this.linkBatch.concat(links);
 		if (
@@ -332,96 +317,6 @@ export default class ArchiveBoxPlugin extends Plugin {
 	}
 
 	/**
-	 * Log into ArchiveBox. Yields a session token that can be used to /add.
-	 * This will be redone every session.
-	 *
-	 * @param username ArchiveBox username.
-	 * @param password ArchiveBox password.
-	 */
-	protected async loginToArchiveBox(
-		username: string,
-		password: string
-	): Promise<void> {
-    if (this.settings.debugMode === true) {
-      console.log("Logging into ArchiveBox...");
-    }
-		try {
-			const loginForm = await this.axios.get("/admin/login");
-			const csrftokenRexp = /^csrftoken=([^;]+);/;
-			const sessionidRexp = /^sessionid=([^;]+);/;
-
-			let nodeCSRFToken: string = "";
-			if (this.isNodeAxios) {
-        if (this.settings.debugMode === true) {
-          console.log("Attempting to retrieve CSRF token from /admin/login");
-        }
-				// retrieve the csrf token cookie
-				if (loginForm.headers["set-cookie"]) {
-					// you can't assume there aren't multiple set-cookie
-					// responses, so we need to take csrftoken out of
-					// the one that it exists in.
-					loginForm.headers["set-cookie"].forEach((cookie) => {
-						let possibleToken = cookie.match(csrftokenRexp);
-						if (possibleToken && possibleToken.length > 1) {
-							nodeCSRFToken = possibleToken[1];
-              if (this.settings.debugMode === true) {
-                console.log("Got CSRF token! " + nodeCSRFToken.substring(5) + "...");
-              }
-						}
-					});
-				}
-			}
-
-			let config: AxiosRequestConfig = {};
-			if (this.isNodeAxios) {
-				config = {
-					headers: {
-						Cookie: `csrftoken=${nodeCSRFToken};`,
-						"Content-Type": "application/x-www-form-urlencoded",
-						Referer: `${this.settings.archiveBoxURI}/admin/login/`,
-					},
-					maxRedirects: 0, // we need to pick up the sessionid off this redirect
-					validateStatus: function (status) {
-						return status >= 200 && status <= 302;
-					},
-				};
-			}
-      if (this.settings.debugMode === true) {
-        console.log("Attempting to use CSRF token.");
-      }
-			const response: AxiosResponse = await this.axios.post(
-				"/admin/login/",
-				{
-					csrfmiddlewaretoken: nodeCSRFToken,
-					username: username,
-					password: password,
-					next: "/add",
-				},
-				config
-			);
-			if (this.isNodeAxios) {
-				if (response.headers["set-cookie"]) {
-					response.headers["set-cookie"].forEach((cookie) => {
-						const match = cookie.match(sessionidRexp);
-						if (match && match.length > 1) {
-							// TODO capture expiry to retrigger login flow
-              this.nodeAxiosSession = match[1];
-              if (this.settings.debugMode === true) {
-                console.log("Captured login session.");
-                console.log(this.nodeAxiosSession.substring(4) + "...");
-              }
-							this.loggedIn = true;
-						}
-					});
-				}
-			}
-		} catch (error) {
-			this.updateStatusBar("ArchiveBox login failed.");
-			throw error;
-		}
-	}
-
-	/**
 	 * Adds an array of URLs to archivebox by POSTing.
 	 * Assumes that you are already logged in.
 	 *
@@ -429,6 +324,7 @@ export default class ArchiveBoxPlugin extends Plugin {
 	 */
 	protected async addUrlsToArchiveBox(urls: string[]) {
 		try {
+			console.log("trying to save: ",urls);
 			let config: AxiosRequestConfig = {
 				timeout: 2000,
 			};
@@ -440,27 +336,30 @@ export default class ArchiveBoxPlugin extends Plugin {
 					headers: {
 						// CSRF token isn't checked for add to make bookmarklet work
 						// but we still need to authenticate.
-						Cookie: `sessionid=${this.nodeAxiosSession}`,
-						"Content-Type": "application/x-www-form-urlencoded",
+						"Authorization": `Bearer ${this.settings.archiveBoxApiKey}`,
+						"Content-Type": "application/json",
 					},
 					validateStatus: function (status) {
-						return status >= 200 && status <= 302;
+						return true;
+						return status >= 200 && status <= 300;
 					},
 					maxRedirects: 0,
 				} as AxiosRequestConfig);
 			}
 			let response = await this.axios.post(
-				"/add/",
+				"/api/v1/cli/add",
 				{
-					url: urls.join("\n"),
-					parser: "url_list",
+					urls: urls,
 					tag: "obsidian",
-					depth: "0",
 				},
 				config
 			);
       if (this.settings.debugMode === true) {
         console.log("Submitted. Status code " + response.status);
+        console.log("Submitted. Data:" + JSON.stringify(response.data));
+      }
+      if (response.status > 299) throw response;
+      if (this.settings.debugMode === true) {
         console.log("Successful run, writing URLs to internal cache.");
       }
       for (let i = 0; i < urls.length; i++) {
@@ -473,6 +372,7 @@ export default class ArchiveBoxPlugin extends Plugin {
 				if (error.code === "ECONNABORTED") return;
         if (this.settings.debugMode === true) {
           console.log("Caught error " + error.code);
+          console.log("Caught error " + error);
         }
 			} else {
         // in a failure case, if we are caching the URIs these
@@ -612,18 +512,11 @@ class ArchiveBoxSettingTab extends PluginSettingTab {
 				placeholder: "https://example.com/archivebox",
 			},
 			{
-				name: "ArchiveBox Username",
-				settingsKey: "archiveBoxUsername",
+				name: "ArchiveBox API Key",
+				settingsKey: "archiveBoxApiKey",
 				type: "text",
 				description: "The username for the ArchiveBox instance.",
-				placeholder: "archivebox",
-			},
-			{
-				name: "ArchiveBox Password",
-				settingsKey: "archiveBoxPassword",
-				type: "text",
-				description: "The password for the ArchiveBox instance.",
-				placeholder: "archivebox",
+				placeholder: "blablabla",
 			},
 			{
 				name: "Ignore RFC1918 Addresses",
